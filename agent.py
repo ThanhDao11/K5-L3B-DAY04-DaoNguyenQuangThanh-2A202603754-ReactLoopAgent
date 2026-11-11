@@ -17,6 +17,7 @@ def run_agent(question, provider, tools, max_steps=6) -> dict:
                 ]
     trace = []
     usage = []
+    observed_sources = []
     for steps in range(1, max_steps + 1):
         try:
             result = provider.complete(messages, SCHEMAS)
@@ -47,8 +48,28 @@ def run_agent(question, provider, tools, max_steps=6) -> dict:
 
         if not calls:
             if result.get('finish') == 'stop':
+                answer = result['message'].get('content') or ''
+                missing_sources = [url for url in observed_sources if url not in answer]
+                if missing_sources:
+                    trace.append({
+                        'event': 'validation_missing_source',
+                        'step': steps,
+                        'sources': missing_sources,
+                    })
+                    if steps == max_steps:
+                        break
+                    messages.append({
+                        'role': 'user',
+                        'content': (
+                            'Revise your answer to include the exact source URL(s) '
+                            'observed in the successful tool results: '
+                            + ', '.join(missing_sources)
+                            + '. Do not add unsupported claims.'
+                        ),
+                    })
+                    continue
                 return {'status': 'completed',
-                        'answer': result['message'].get('content') or '',
+                        'answer': answer,
                         'trace': trace,
                         'usage': usage}
             finish = result.get('finish')
@@ -82,6 +103,15 @@ def run_agent(question, provider, tools, max_steps=6) -> dict:
                         'error': type(exc).__name__,
                         'message': str(exc)[:200],
                     }
+                if (
+                    tool_name == 'get_incident_details'
+                    and isinstance(tool_result, dict)
+                    and tool_result.get('ok') is True
+                    and isinstance(tool_result.get('url'), str)
+                    and tool_result['url']
+                    and tool_result['url'] not in observed_sources
+                ):
+                    observed_sources.append(tool_result['url'])
 
             trace.append({'event': 'tool', 
                           'step': steps,
